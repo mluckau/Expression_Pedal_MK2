@@ -1,0 +1,5 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "ProMicro")(type "Legacy")(uri "/run/media/michael/Work/Music-Projekte/Hardware/Expression Pedal USB-Adapter/ProMicroKiCad/promicro_library/promicro.lib")(options "")(descr ""))
+  (lib (name "NYS216")(type "KiCad")(uri "/run/media/michael/Work/Music-Projekte/Hardware/Expression Pedal USB-Adapter/NYS216_Symbol/NYS216.kicad_sym")(options "")(descr ""))
+)
