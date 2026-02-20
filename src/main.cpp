@@ -1,64 +1,123 @@
 #include <Arduino.h>
 #include <MIDIUSB.h>
 
-int EXPRESSION_PEDAL_1 = A0;
-int EXPRESSION_PEDAL_2 = A2;
-int EXP_P1_CHECK = 5;
-int EXP_P2_CHECK = 6;
-int pedal1enable = 0;
-int pedal2enable = 0;
-int previousExpressionPedal1Value = -1;
-int previousExpressionPedal2Value = -1;
+/**
+ * ExpressionPedal Klasse
+ * Kapselt Glättung, Kalibrierung und MIDI-Logik für ein einzelnes Pedal.
+ */
+class ExpressionPedal {
+  private:
+    uint8_t _analogPin;
+    uint8_t _checkPin;
+    uint8_t _ccNumber;
+    uint8_t _midiChannel;
+    
+    float _smoothedValue;
+    int _minVal;
+    int _maxVal;
+    int _lastSentMidiValue;
+    
+    const float _alpha;
+    const int _deadZone;
 
-void setup()
-{
-  Serial.begin(9600);
-  pinMode(EXP_P1_CHECK, INPUT_PULLUP);
-  pinMode(EXP_P2_CHECK, INPUT_PULLUP);
+  public:
+    ExpressionPedal(uint8_t analogPin, uint8_t checkPin, uint8_t cc, uint8_t channel = 1)
+      : _analogPin(analogPin), 
+        _checkPin(checkPin), 
+        _ccNumber(cc), 
+        _midiChannel(channel),
+        _smoothedValue(0),
+        _minVal(1023),
+        _maxVal(0),
+        _lastSentMidiValue(-1),
+        _alpha(0.15),
+        _deadZone(15) {}
+
+    void begin() {
+      pinMode(_checkPin, INPUT_PULLUP);
+      // Initial-Messung für den Filter
+      _smoothedValue = analogRead(_analogPin);
+    }
+
+    void update() {
+      // Prüfen, ob Pedal aktiviert ist (HIGH = Aktiv durch Pullup/Switch)
+      if (digitalRead(_checkPin) == LOW) return;
+
+      // "Double-Reading" Fix gegen ADC-Crosstalk: 
+      // Erster Wert wird verworfen, damit der ADC-Kondensator sich stabilisieren kann.
+      analogRead(_analogPin); 
+      int raw = analogRead(_analogPin);
+
+      // 1. Auto-Kalibrierung (Lernen der mechanischen Grenzen)
+      if (raw < _minVal) _minVal = raw;
+      if (raw > _maxVal) _maxVal = raw;
+
+      // 2. Glättung (EMA Filter)
+      _smoothedValue = (_alpha * raw) + ((1.0 - _alpha) * _smoothedValue);
+
+      // 3. Mapping & Senden (nur wenn Bereich kalibriert wurde)
+      if (_maxVal > _minVal + (_deadZone * 2)) {
+        int mapped = map((int)_smoothedValue, _minVal + _deadZone, _maxVal - _deadZone, 0, 127);
+        int currentMidiValue = constrain(mapped, 0, 127);
+
+        // Nur senden, wenn sich der MIDI-Wert tatsächlich geändert hat
+        if (currentMidiValue != _lastSentMidiValue) {
+          sendMidi(currentMidiValue);
+          _lastSentMidiValue = currentMidiValue;
+        }
+      }
+    }
+
+  private:
+    void sendMidi(uint8_t value) {
+      TXLED1; // LED an (Pro Micro spezifisch)
+      
+      // MIDI Packet: {Header, Message Type | Channel, Data 1 (CC), Data 2 (Value)}
+      // Kanal ist 0-basiert in der Library (0 = Channel 1)
+      midiEventPacket_t event = {0x0B, (uint8_t)(0xB0 | (_midiChannel - 1)), _ccNumber, value};
+      MidiUSB.sendMIDI(event);
+      MidiUSB.flush();
+      
+      TXLED0; // LED aus
+
+      // Debugging
+      Serial.print("Pedal (CC "); Serial.print(_ccNumber);
+      Serial.print("): "); Serial.print(value);
+      Serial.print(" [Range: "); Serial.print(_minVal);
+      Serial.print("-"); Serial.print(_maxVal);
+      Serial.println("]");
+    }
+};
+
+// --- Instanzen & Globale Variablen ---
+
+// Pedal 1: Pin A0, Check-Pin 5, CC 11 (Expression), Kanal 1
+ExpressionPedal pedal1(A0, 5, 11, 1);
+// Pedal 2: Pin A2, Check-Pin 6, CC 16 (GenPurp 1), Kanal 1
+ExpressionPedal pedal2(A2, 6, 16, 1);
+
+unsigned long lastUpdate = 0;
+const unsigned long UPDATE_INTERVAL_MS = 5; // 200Hz Abtastrate
+
+void setup() {
+  Serial.begin(115200); // Höhere Baudrate für weniger Latenz im Debugging
+  
+  pedal1.begin();
+  pedal2.begin();
+
+  // Sicherstellen, dass LEDs aus sind
+  TXLED0;
+  RXLED0;
 }
 
-void pedal1()
-{
-  uint8_t expressionPedal1 = map(analogRead(EXPRESSION_PEDAL_1), 0, 1023, 0, 127);
-  if (expressionPedal1 != previousExpressionPedal1Value)
-  {
-    midiEventPacket_t cc = {0x0B, 0xB0 | 0, 11, expressionPedal1};
-    MidiUSB.sendMIDI(cc);
-    MidiUSB.flush();
-    Serial.print("Pedal_1 send: ");
-    Serial.print(expressionPedal1);
-    Serial.print("\n");
-  }
-  previousExpressionPedal1Value = expressionPedal1;
-}
+void loop() {
+  unsigned long now = millis();
 
-void pedal2()
-{
-  uint8_t expressionPedal2 = map(analogRead(EXPRESSION_PEDAL_2), 0, 1023, 0, 127);
-  if (expressionPedal2 != previousExpressionPedal2Value)
-  {
-    midiEventPacket_t cc = {0x0B, 0xB0 | 0, 16, expressionPedal2};
-    MidiUSB.sendMIDI(cc);
-    MidiUSB.flush();
-    Serial.print("Pedal_2 send: ");
-    Serial.print(expressionPedal2);
-    Serial.print("\n");
-  }
-  previousExpressionPedal2Value = expressionPedal2;
-}
-
-void loop()
-{
-  pedal1enable = digitalRead(EXP_P1_CHECK);
-  pedal2enable = digitalRead(EXP_P2_CHECK);
-
-  if (pedal1enable == HIGH)
-  {
-    pedal1();
-  }
-
-  if (pedal2enable == HIGH)
-  {
-    pedal2();
+  // Zeitgesteuerte Abfrage (Non-blocking)
+  if (now - lastUpdate >= UPDATE_INTERVAL_MS) {
+    lastUpdate = now;
+    
+    pedal1.update();
+    pedal2.update();
   }
 }
